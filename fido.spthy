@@ -1,0 +1,1350 @@
+theory FIDO2_UV_Downgrade_AuthFocused
+begin
+
+builtins: hashing, signing
+functions: hmac/2
+
+/*
+===============================================================================
+AUTHENTICATION-FOCUSED FIDO2 / WebAuthn + CTAP MODEL
+===============================================================================
+
+Parties (one fixed instance of each role):
+  RP  <------ WebAuthn ------>  Browser/Platform  <------ CTAP ------> Authenticator
+
+Channel configurations:
+  default:
+      WebAuthn secure, CTAP secure
+
+  -DWEBAUTHN_INSECURE:
+      WebAuthn Dolev-Yao controlled, CTAP secure
+
+  -DCTAP_INSECURE:
+      WebAuthn secure, CTAP Dolev-Yao controlled
+
+  -DWEBAUTHN_INSECURE -DCTAP_INSECURE:
+      both channels Dolev-Yao controlled
+
+Scope:
+  This model studies AUTHENTICATION UV downgrade only.
+
+  A successful prior registration is abstracted by Provision_Registered_Credential.
+  The rule creates the same fresh credential identifier/key at the RP and the
+  authenticator.  No registration-network behavior is modeled here.
+
+Why this is faithful for the target property:
+  The authentication ceremony starts from exactly the state WebAuthn assumes
+  after successful registration: the RP knows a credential public key and the
+  authenticator owns the corresponding private key.
+
+Security-relevant fields preserved:
+  * fresh RP challenge
+  * credentialId / credential signing key
+  * WebAuthn userVerification policy
+  * clientData = (webauthn.get, challenge, origin)
+  * clientDataHash
+  * rpIdHash
+  * UP / UV bits
+  * fresh GA pinUvAuthToken abstraction
+  * pinUvAuthParam = HMAC(token, clientDataHash)
+  * signature over (authenticatorData, clientDataHash)
+  * RP's ORIGINAL pending policy = required
+
+Fixed / abstracted:
+  * rpId = 'rp_id'
+  * origin = 'origin'
+  * known-account authentication with allowCredentials = credentialId
+  * counter = zero
+  * GetInfo / PIN-ECDH / token encryption / extensions / COSE wrappers omitted
+  * preferred policy omitted: target comparison is required vs discouraged
+  * explicit reject state omitted; absence of RPAuthenticationAccepted is enough
+
+There is NO dedicated downgrade transition.  In insecure modes the attacker
+must construct modified protocol messages using ordinary Tamarin In/Out.
+
+Preprocessor style:
+  CTAP/GetAssertion variants use flat boolean #ifdef formulas rather than
+  nested conditionals. This also removes unreachable no-UV rules from the
+  fully secure configuration.
+*/
+
+
+/* ===========================================================================
+   PRE-PROVISIONED CREDENTIAL
+   =========================================================================== */
+
+rule Provision_Registered_Credential:
+  [
+    Fr(~credentialId),
+    Fr(~credentialKey),
+    Fr(~pin)
+  ]
+  --[
+    CredentialProvisioned(
+      ~credentialId,
+      pk(~credentialKey)),
+
+    PINProvisioned(
+      ~pin),
+
+    SecretCredentialKey(
+      ~credentialKey),
+
+    SecretPIN(
+      ~pin)
+  ]->
+  [
+    !RPRegisteredCredential(
+      ~credentialId,
+      pk(~credentialKey)),
+
+    !AuthenticatorCredential(
+      ~credentialId,
+      ~credentialKey),
+
+    !AuthenticatorPIN(
+      ~pin)
+  ]
+
+
+/* ===========================================================================
+   WEBAUTHN: RP -> BROWSER AUTHENTICATION OPTIONS (M5)
+   =========================================================================== */
+
+#ifdef WEBAUTHN_INSECURE
+
+rule RP_Send_M5_Insecure:
+  [
+    !RPRegisteredCredential(
+      credentialId,
+      credentialPublicKey),
+
+    Fr(~challenge)
+  ]
+  --[
+    RPAuthenticationChallengeSent(
+      credentialId,
+      ~challenge,
+      'required'),
+
+    RunningRPAuthContext(
+      credentialId,
+      h(<'webauthn_get',~challenge,'origin'>),
+      'user_verified'),
+
+    WebAuthnChannelSent(
+      'M5',
+      'required',
+      'insecure')
+  ]->
+  [
+    St_RP_AuthPending(
+      ~challenge,
+      credentialId,
+      credentialPublicKey,
+      'required'),
+
+    Out(
+      <'wa_m5',
+       ~challenge,
+       credentialId,
+       'required'>)
+  ]
+
+
+rule Browser_Prepare_Required_Insecure:
+  let
+    clientData =
+      <'webauthn_get',
+       challenge,
+       'origin'>
+
+    clientHash =
+      h(clientData)
+  in
+  [
+    In(
+      <'wa_m5',
+       challenge,
+       credentialId,
+       'required'>)
+  ]
+  --[
+    WebAuthnChannelDelivered(
+      'M5',
+      'required',
+      'insecure'),
+
+    BrowserAuthenticationPrepared(
+      credentialId,
+      challenge,
+      'required',
+      'true')
+  ]->
+  [
+    St_Browser_NeedGAToken(
+      challenge,
+      credentialId,
+      clientData,
+      clientHash)
+  ]
+
+
+rule Browser_Prepare_Discouraged_Insecure:
+  let
+    clientData =
+      <'webauthn_get',
+       challenge,
+       'origin'>
+
+    clientHash =
+      h(clientData)
+  in
+  [
+    In(
+      <'wa_m5',
+       challenge,
+       credentialId,
+       'discouraged'>)
+  ]
+  --[
+    WebAuthnChannelDelivered(
+      'M5',
+      'discouraged',
+      'insecure'),
+
+    BrowserAuthenticationPrepared(
+      credentialId,
+      challenge,
+      'discouraged',
+      'false')
+  ]->
+  [
+    St_Browser_NoUV(
+      challenge,
+      credentialId,
+      clientData,
+      clientHash)
+  ]
+
+#else
+
+rule RP_Send_M5_Secure:
+  [
+    !RPRegisteredCredential(
+      credentialId,
+      credentialPublicKey),
+
+    Fr(~challenge)
+  ]
+  --[
+    RPAuthenticationChallengeSent(
+      credentialId,
+      ~challenge,
+      'required'),
+
+    RunningRPAuthContext(
+      credentialId,
+      h(<'webauthn_get',~challenge,'origin'>),
+      'user_verified'),
+
+    WebAuthnChannelSent(
+      'M5',
+      'required',
+      'secure')
+  ]->
+  [
+    St_RP_AuthPending(
+      ~challenge,
+      credentialId,
+      credentialPublicKey,
+      'required'),
+
+    Sec_WA_M5(
+      ~challenge,
+      credentialId,
+      'required')
+  ]
+
+
+rule Browser_Prepare_Required_Secure:
+  let
+    clientData =
+      <'webauthn_get',
+       challenge,
+       'origin'>
+
+    clientHash =
+      h(clientData)
+  in
+  [
+    Sec_WA_M5(
+      challenge,
+      credentialId,
+      'required')
+  ]
+  --[
+    WebAuthnChannelDelivered(
+      'M5',
+      'required',
+      'secure'),
+
+    BrowserAuthenticationPrepared(
+      credentialId,
+      challenge,
+      'required',
+      'true')
+  ]->
+  [
+    St_Browser_NeedGAToken(
+      challenge,
+      credentialId,
+      clientData,
+      clientHash)
+  ]
+
+#endif
+
+
+/* ===========================================================================
+   LOCAL UV + PIN/UV TOKEN ABSTRACTION
+   =========================================================================== */
+
+rule Browser_Acquire_GA_UV_Token:
+  [
+    St_Browser_NeedGAToken(
+      challenge,
+      credentialId,
+      clientData,
+      clientHash),
+
+    !AuthenticatorPIN(pin),
+
+    Fr(~token)
+  ]
+  --[
+    PINVerified(pin),
+
+   UVAuthorizedForSession(
+    'rp_id',
+    clientHash,
+    'ga',
+    ~token),
+
+    
+
+    AuthenticatorUVPerformed(
+      credentialId),
+
+    TokenIssued(
+      ~token,
+      'ga',
+      'rp_id'),
+
+    SecretToken(
+      ~token)
+  ]->
+  [
+    St_Browser_HaveGAToken(
+      challenge,
+      credentialId,
+      clientData,
+      clientHash,
+      ~token),
+
+    St_ValidGAToken(
+      ~token,
+      'rp_id')
+  ]
+
+
+
+/* ===========================================================================
+   CTAP: BROWSER -> AUTHENTICATOR GETASSERTION
+   =========================================================================== */
+
+/*
+  IMPORTANT:
+  These preprocessor conditions are deliberately FLAT (not nested).
+
+  Tamarin supports boolean #ifdef formulas.  This avoids pairing problems
+  between an outer CTAP conditional and an inner WebAuthn conditional.
+
+  Reachability:
+    - Browser no-UV send exists only when WEBAUTHN_INSECURE.
+    - Authenticator no-UV receive on insecure CTAP remains available even when
+      WebAuthn is secure, because the Dolev-Yao attacker can construct it.
+    - On secure CTAP, the no-UV receive rule exists only together with the
+      legitimate Browser no-UV sender.
+*/
+
+
+#ifdef CTAP_INSECURE
+
+rule Browser_Send_GA_WithUV_Insecure:
+  [
+    St_Browser_HaveGAToken(
+      challenge,
+      credentialId,
+      clientData,
+      clientHash,
+      token)
+  ]
+  --[
+    BrowserGetAssertionSent(
+      credentialId,
+      clientHash,
+      'token'),
+
+    RunningBrowserAuthContext(
+      credentialId,
+      clientHash,
+      'user_verified'),
+
+    BrowserPinUvAuthParamSent(
+      credentialId,
+      clientHash,
+      hmac(token,clientHash)),
+
+    CTAPChannelSent(
+      'GA_UV',
+      'insecure')
+  ]->
+  [
+    St_Browser_AwaitAssertion(
+      challenge,
+      credentialId,
+      clientData,
+      clientHash),
+
+    Out(
+      <'ctap_ga_uv',
+       credentialId,
+       clientHash,
+       hmac(token,clientHash)>)
+  ]
+
+rule Authenticator_GA_WithUV_Insecure:
+  let
+    authData =
+      <'auth_data',
+       h('rp_id'),
+       'true',
+       'true',
+       'zero'>
+
+    signature =
+      sign(
+        <authData,clientHash>,
+        credentialKey)
+  in
+  [
+    St_ValidGAToken(
+      token,
+      'rp_id'),
+
+    !AuthenticatorCredential(
+      credentialId,
+      credentialKey),
+
+    In(
+      <'ctap_ga_uv',
+       credentialId,
+       clientHash,
+       hmac(token,clientHash)>)
+  ]
+  --[
+    CTAPChannelDelivered(
+      'GA_UV',
+      'insecure'),
+
+CommitAuthenticatorUV(
+  'rp_id',
+  clientHash,
+  'ga',
+  token),
+
+    CommitAuthenticatorAuthContext(
+      credentialId,
+      clientHash,
+      'user_verified'),
+
+    AuthenticatorGetAssertionAuthorized(
+      credentialId,
+      clientHash,
+      'token',
+      'true'),
+
+    AuthenticatorPinUvAuthParamAccepted(
+      credentialId,
+      clientHash,
+      hmac(token,clientHash)),
+
+    AssertionSigned(
+      credentialId,
+      credentialKey,
+      clientHash,
+      'true'),
+
+    CommitAuthenticatorAuthContext(
+      credentialId,
+      clientHash,
+      'user_verified')
+  ]->
+  [
+    Out(
+      <'ctap_ga_resp',
+       credentialId,
+       authData,
+       signature>)
+  ]
+
+rule Authenticator_GA_WithoutUV_Insecure:
+  let
+    authData =
+      <'auth_data',
+       h('rp_id'),
+       'true',
+       'false',
+       'zero'>
+
+    signature =
+      sign(
+        <authData,clientHash>,
+        credentialKey)
+  in
+  [
+    !AuthenticatorCredential(
+      credentialId,
+      credentialKey),
+
+    In(
+      <'ctap_ga_no_uv',
+       credentialId,
+       clientHash>)
+  ]
+  --[
+    CTAPChannelDelivered(
+      'GA_NOUV',
+      'insecure'),
+
+    AuthenticatorGetAssertionAuthorized(
+      credentialId,
+      clientHash,
+      'no_token',
+      'false'),
+
+    AssertionSigned(
+      credentialId,
+      credentialKey,
+      clientHash,
+      'false'),
+
+    CommitAuthenticatorAuthContext(
+      credentialId,
+      clientHash,
+      'presence_only')
+  ]->
+  [
+    Out(
+      <'ctap_ga_resp',
+       credentialId,
+       authData,
+       signature>)
+  ]
+
+#endif
+
+
+#ifdef CTAP_INSECURE & WEBAUTHN_INSECURE
+
+rule Browser_Send_GA_WithoutUV_Insecure:
+  [
+    St_Browser_NoUV(
+      challenge,
+      credentialId,
+      clientData,
+      clientHash)
+  ]
+  --[
+    BrowserGetAssertionSent(
+      credentialId,
+      clientHash,
+      'no_uv'),
+
+    RunningBrowserAuthContext(
+      credentialId,
+      clientHash,
+      'presence_only'),
+
+    CTAPChannelSent(
+      'GA_NOUV',
+      'insecure')
+  ]->
+  [
+    St_Browser_AwaitAssertion(
+      challenge,
+      credentialId,
+      clientData,
+      clientHash),
+
+    Out(
+      <'ctap_ga_no_uv',
+       credentialId,
+       clientHash>)
+  ]
+
+#endif
+
+
+#ifdef not CTAP_INSECURE
+
+rule Browser_Send_GA_WithUV_Secure:
+  [
+    St_Browser_HaveGAToken(
+      challenge,
+      credentialId,
+      clientData,
+      clientHash,
+      token)
+  ]
+  --[
+    BrowserGetAssertionSent(
+      credentialId,
+      clientHash,
+      'token'),
+
+    RunningBrowserAuthContext(
+      credentialId,
+      clientHash,
+      'user_verified'),
+
+    BrowserPinUvAuthParamSent(
+      credentialId,
+      clientHash,
+      hmac(token,clientHash)),
+
+    CTAPChannelSent(
+      'GA_UV',
+      'secure')
+  ]->
+  [
+    St_Browser_AwaitAssertion(
+      challenge,
+      credentialId,
+      clientData,
+      clientHash),
+
+    Sec_CTAP_GAUV(
+      credentialId,
+      clientHash,
+      hmac(token,clientHash))
+  ]
+
+rule Authenticator_GA_WithUV_Secure:
+  let
+    authData =
+      <'auth_data',
+       h('rp_id'),
+       'true',
+       'true',
+       'zero'>
+
+    signature =
+      sign(
+        <authData,clientHash>,
+        credentialKey)
+  in
+  [
+    St_ValidGAToken(
+      token,
+      'rp_id'),
+
+    !AuthenticatorCredential(
+      credentialId,
+      credentialKey),
+
+    Sec_CTAP_GAUV(
+      credentialId,
+      clientHash,
+      hmac(token,clientHash))
+  ]
+  --[
+    CTAPChannelDelivered(
+      'GA_UV',
+      'secure'),
+
+    AuthenticatorGetAssertionAuthorized(
+      credentialId,
+      clientHash,
+      'token',
+      'true'),
+
+CommitAuthenticatorUV(
+  'rp_id',
+  clientHash,
+  'ga',
+  token),
+
+    CommitAuthenticatorAuthContext(
+      credentialId,
+      clientHash,
+      'user_verified'),
+
+    AuthenticatorPinUvAuthParamAccepted(
+      credentialId,
+      clientHash,
+      hmac(token,clientHash)),
+
+    AssertionSigned(
+      credentialId,
+      credentialKey,
+      clientHash,
+      'true'),
+
+    CommitAuthenticatorAuthContext(
+      credentialId,
+      clientHash,
+      'user_verified')
+  ]->
+  [
+    Sec_CTAP_GAResp(
+      credentialId,
+      authData,
+      signature)
+  ]
+
+#endif
+
+
+#ifdef WEBAUTHN_INSECURE & not CTAP_INSECURE 
+
+rule Browser_Send_GA_WithoutUV_Secure:
+  [
+    St_Browser_NoUV(
+      challenge,
+      credentialId,
+      clientData,
+      clientHash)
+  ]
+  --[
+    BrowserGetAssertionSent(
+      credentialId,
+      clientHash,
+      'no_uv'),
+
+    RunningBrowserAuthContext(
+      credentialId,
+      clientHash,
+      'presence_only'),
+
+    CTAPChannelSent(
+      'GA_NOUV',
+      'secure')
+  ]->
+  [
+    St_Browser_AwaitAssertion(
+      challenge,
+      credentialId,
+      clientData,
+      clientHash),
+
+    Sec_CTAP_GANoUV(
+      credentialId,
+      clientHash)
+  ]
+
+rule Authenticator_GA_WithoutUV_Secure:
+  let
+    authData =
+      <'auth_data',
+       h('rp_id'),
+       'true',
+       'false',
+       'zero'>
+
+    signature =
+      sign(
+        <authData,clientHash>,
+        credentialKey)
+  in
+  [
+    !AuthenticatorCredential(
+      credentialId,
+      credentialKey),
+
+    Sec_CTAP_GANoUV(
+      credentialId,
+      clientHash)
+  ]
+  --[
+    CTAPChannelDelivered(
+      'GA_NOUV',
+      'secure'),
+
+    AuthenticatorGetAssertionAuthorized(
+      credentialId,
+      clientHash,
+      'no_token',
+      'false'),
+
+    AssertionSigned(
+      credentialId,
+      credentialKey,
+      clientHash,
+      'false'),
+
+    CommitAuthenticatorAuthContext(
+      credentialId,
+      clientHash,
+      'presence_only')
+  ]->
+  [
+    Sec_CTAP_GAResp(
+      credentialId,
+      authData,
+      signature)
+  ]
+
+#endif
+
+
+/* ===========================================================================
+   CTAP RESPONSE -> BROWSER, THEN WEBAUTHN M8 -> RP
+   =========================================================================== */
+
+#ifdef CTAP_INSECURE
+
+rule Browser_Receive_GA_Response_Insecure:
+  [
+    St_Browser_AwaitAssertion(
+      challenge,
+      credentialId,
+      clientData,
+      clientHash),
+
+    In(
+      <'ctap_ga_resp',
+       credentialId,
+       authData,
+       signature>)
+  ]
+  --[
+    CTAPChannelDelivered(
+      'GA_RESP',
+      'insecure')
+  ]->
+  [
+    St_Browser_HaveAssertion(
+      challenge,
+      credentialId,
+      clientData,
+      clientHash,
+      authData,
+      signature)
+  ]
+
+#else
+
+rule Browser_Receive_GA_Response_Secure:
+  [
+    St_Browser_AwaitAssertion(
+      challenge,
+      credentialId,
+      clientData,
+      clientHash),
+
+    Sec_CTAP_GAResp(
+      credentialId,
+      authData,
+      signature)
+  ]
+  --[
+    CTAPChannelDelivered(
+      'GA_RESP',
+      'secure')
+  ]->
+  [
+    St_Browser_HaveAssertion(
+      challenge,
+      credentialId,
+      clientData,
+      clientHash,
+      authData,
+      signature)
+  ]
+
+#endif
+
+
+#ifdef WEBAUTHN_INSECURE
+
+rule Browser_Send_M8_Insecure:
+  [
+    St_Browser_HaveAssertion(
+      challenge,
+      credentialId,
+      clientData,
+      clientHash,
+      authData,
+      signature)
+  ]
+  --[
+    BrowserAuthenticationM8Sent(
+      credentialId,
+      challenge),
+
+    WebAuthnChannelSent(
+      'M8',
+      'response',
+      'insecure')
+  ]->
+  [
+    Out(
+      <'wa_m8',
+       clientData,
+       credentialId,
+       authData,
+       signature>)
+  ]
+
+
+rule RP_Accept_M8_Insecure:
+  let
+    clientData =
+      <'webauthn_get',
+       challenge,
+       'origin'>
+
+    clientHash =
+      h(clientData)
+
+    authData =
+      <'auth_data',
+       h('rp_id'),
+       'true',
+       'true',
+       'zero'>
+  in
+  [
+    St_RP_AuthPending(
+      challenge,
+      credentialId,
+      credentialPublicKey,
+      'required'),
+
+    In(
+      <'wa_m8',
+       clientData,
+       credentialId,
+       authData,
+       signature>)
+  ]
+  --[
+    WebAuthnChannelDelivered(
+      'M8',
+      'response',
+      'insecure'),
+
+    Eq(
+      verify(
+        signature,
+        <authData,clientHash>,
+        credentialPublicKey),
+      true),
+
+    RPAuthenticationAccepted(
+      credentialId,
+      clientHash,
+      'true')
+  ]->
+  [
+    St_RP_Accepted(
+      credentialId)
+  ]
+
+#else
+
+rule Browser_Send_M8_Secure:
+  [
+    St_Browser_HaveAssertion(
+      challenge,
+      credentialId,
+      clientData,
+      clientHash,
+      authData,
+      signature)
+  ]
+  --[
+    BrowserAuthenticationM8Sent(
+      credentialId,
+      challenge),
+
+    WebAuthnChannelSent(
+      'M8',
+      'response',
+      'secure')
+  ]->
+  [
+    Sec_WA_M8(
+      clientData,
+      credentialId,
+      authData,
+      signature)
+  ]
+
+
+rule RP_Accept_M8_Secure:
+  let
+    clientData =
+      <'webauthn_get',
+       challenge,
+       'origin'>
+
+    clientHash =
+      h(clientData)
+
+    authData =
+      <'auth_data',
+       h('rp_id'),
+       'true',
+       'true',
+       'zero'>
+  in
+  [
+    St_RP_AuthPending(
+      challenge,
+      credentialId,
+      credentialPublicKey,
+      'required'),
+
+    Sec_WA_M8(
+      clientData,
+      credentialId,
+      authData,
+      signature)
+  ]
+  --[
+    WebAuthnChannelDelivered(
+      'M8',
+      'response',
+      'secure'),
+
+    Eq(
+      verify(
+        signature,
+        <authData,clientHash>,
+        credentialPublicKey),
+      true),
+
+    RPAuthenticationAccepted(
+      credentialId,
+      clientHash,
+      'true')
+  ]->
+  [
+    St_RP_Accepted(
+      credentialId)
+  ]
+
+#endif
+
+
+/* ===========================================================================
+   RESTRICTION
+   =========================================================================== */
+
+restriction Equality:
+  "All x y #i. Eq(x,y) @ #i ==> x = y"
+
+
+/* ===========================================================================
+   LEMMAS
+   =========================================================================== */
+
+/* Normal authentication must be executable. */
+lemma executable_authentication:
+  exists-trace
+  "
+  Ex credentialId credentialKey clientHash #i #j #k.
+
+       CredentialProvisioned(
+         credentialId,
+         pk(credentialKey)) @ #i
+
+     & AssertionSigned(
+         credentialId,
+         credentialKey,
+         clientHash,
+         'true') @ #j
+
+     & RPAuthenticationAccepted(
+         credentialId,
+         clientHash,
+         'true') @ #k
+
+     & #i < #j
+     & #j < #k
+  "
+
+
+/*
+  WebAuthn semantic downgrade:
+    RP sends required,
+    Browser processes discouraged,
+    Browser sends no-UV GA,
+    authenticator signs UV=false.
+*/
+
+
+/* Original required policy means RP acceptance always carries UV=true. */
+lemma rp_required_uv_acceptance:
+  "
+  All credentialId clientHash uv #i.
+
+    RPAuthenticationAccepted(
+      credentialId,
+      clientHash,
+      uv) @ #i
+
+    ==> uv = 'true'
+  "
+
+
+/* ===========================================================================
+   CONFIDENTIALITY / SECRECY PROPERTIES
+   =========================================================================== */
+
+/* Credential signing private key secrecy. */
+lemma credential_private_key_secrecy:
+  "
+  All credentialKey #i.
+
+    SecretCredentialKey(
+      credentialKey) @ #i
+
+    ==> not (
+          Ex #j.
+            K(credentialKey) @ #j
+        )
+  "
+
+
+/*
+  PIN secrecy in this abstraction.
+  The PIN/UV protocol is modeled atomically, so this proves the secrecy
+  assumption of that abstract layer rather than the cryptography of the
+  full CTAP PIN/UV ECDH/KDF/encryption exchange.
+*/
+lemma pin_secrecy:
+  "
+  All pin #i.
+
+    SecretPIN(
+      pin) @ #i
+
+    ==> not (
+          Ex #j.
+            K(pin) @ #j
+        )
+  "
+
+
+/*
+  Fresh GetAssertion pinUvAuthToken secrecy.
+  The token itself is never output; only hmac(token, clientDataHash) may
+  appear on an insecure CTAP channel.
+*/
+lemma ga_token_secrecy:
+  "
+  All token #i.
+
+    SecretToken(
+      token) @ #i
+
+    ==> not (
+          Ex #j.
+            K(token) @ #j
+        )
+  "
+
+
+/* ===========================================================================
+   AUTHENTICATION / AGREEMENT PROPERTIES
+   =========================================================================== */
+
+/*
+  A1. RP <-> Browser agreement on the WebAuthn UV policy.
+
+  Whenever the Browser accepts an authentication-options message with a
+  particular policy/effective-UV interpretation, the RP must previously have
+  sent the SAME challenge, credentialId and policy.
+
+  This is intentionally non-injective agreement: it isolates policy
+  substitution from replay.  Expected to fail exactly when the WebAuthn
+  channel is attacker-controlled.
+*/
+/*
+  A5. Local PIN -> token authorization binding.
+
+  In this abstraction the PIN/UV subprotocol is atomic.  Every issued GA token
+  must therefore be backed by a PIN verification in the same local operation.
+
+  This is NOT a network PIN-authentication theorem; it validates the abstraction
+  boundary.  A real PIN-channel authentication theorem requires modeling the
+  CTAP PIN/UV ECDH/KDF/encryption exchange explicitly.
+*/
+lemma pin_authorizes_token_issuance:
+  "
+  All token #i.
+
+    TokenIssued(
+      token,
+      'ga',
+      'rp_id') @ #i
+
+    ==> (
+      Ex pin.
+        PINVerified(
+          pin) @ #i
+    )
+  "
+
+
+/* ===========================================================================
+   GENERIC AUTHENTICATION-CONTEXT AGREEMENT
+   =========================================================================== */
+
+/*
+  G1. Three-party non-injective agreement on the authentication context.
+
+  This is a generic Lowe-style correspondence property.  It does NOT mention
+  a UV downgrade, a modified policy, a missing PIN, or a particular attacker.
+
+  `authContext` is the semantic authentication assurance executed in one
+  ceremony:
+      'user_verified'  - a user-verification-backed ceremony
+      'presence_only'  - a ceremony providing user presence only
+
+  Whenever the authenticator completes an assertion under some context, the
+  RP and Browser must previously have been running the SAME credential/hash
+  under exactly that same context.
+
+  Since clientHash contains the fresh RP challenge, it also identifies the
+  authentication ceremony.
+*/
+lemma noninjective_agreement_authentication_context:
+  "
+  All credentialId clientHash authContext #commit.
+
+    CommitAuthenticatorAuthContext(
+      credentialId,
+      clientHash,
+      authContext) @ #commit
+
+    ==> (
+      Ex #rp #browser.
+
+        RunningRPAuthContext(
+          credentialId,
+          clientHash,
+          authContext) @ #rp
+
+        & RunningBrowserAuthContext(
+            credentialId,
+            clientHash,
+            authContext) @ #browser
+
+        & #rp < #browser
+        & #browser < #commit
+    )
+  "
+
+
+/*
+  G2. Three-party injective agreement on the authentication context.
+
+  This strengthens G1 with uniqueness: one completed authenticator ceremony
+  for an agreed fresh session context must not have a second matching commit.
+  It therefore also captures replay/session-duplication failures.
+*/
+lemma injective_agreement_authentication_context:
+  "
+  All credentialId clientHash authContext #commit.
+
+    CommitAuthenticatorAuthContext(
+      credentialId,
+      clientHash,
+      authContext) @ #commit
+
+    ==> (
+      Ex #rp #browser.
+
+        RunningRPAuthContext(
+          credentialId,
+          clientHash,
+          authContext) @ #rp
+
+        & RunningBrowserAuthContext(
+            credentialId,
+            clientHash,
+            authContext) @ #browser
+
+        & #rp < #browser
+        & #browser < #commit
+
+        & not (
+            Ex #commit2.
+              CommitAuthenticatorAuthContext(
+                credentialId,
+                clientHash,
+                authContext) @ #commit2
+              & not (#commit2 = #commit)
+          )
+    )
+  "
+lemma authentication_context_consistency:
+  "
+  All credentialId clientHash
+      expectedContext actualContext
+      #rp #auth.
+
+    RunningRPAuthContext(
+      credentialId,
+      clientHash,
+      expectedContext) @ #rp
+
+    & CommitAuthenticatorAuthContext(
+        credentialId,
+        clientHash,
+        actualContext) @ #auth
+
+    & #rp < #auth
+
+    ==> expectedContext = actualContext
+  "
+
+
+lemma authentication_assurance_provenance:
+  "
+  All clientHash token #auth.
+
+    CommitAuthenticatorUV(
+      'rp_id',
+      clientHash,
+      'ga',
+      token) @ #auth
+
+    ==> (
+      Ex #uv.
+        UVAuthorizedForSession(
+          'rp_id',
+          clientHash,
+          'ga',
+          token) @ #uv
+
+        & #uv < #auth
+    )
+  "
+
+end

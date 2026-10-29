@@ -1,0 +1,29 @@
+maude tool: 'maude'
+ checking version: 3.1. OK.
+ checking installation: OK.
+[Theory FIDO2_UV_Downgrade_AuthFocused] Theory loaded
+[Theory FIDO2_UV_Downgrade_AuthFocused] Theory translated
+[Theory FIDO2_UV_Downgrade_AuthFocused] Derivation checks started
+[Theory FIDO2_UV_Downgrade_AuthFocused] Derivation checks ended
+[Theory FIDO2_UV_Downgrade_AuthFocused] Theory closed
+
+==============================================================================
+summary of summaries:
+
+analyzed: fido.spthy
+
+  output:          proofs/webauthn_insecure_pin_authorizes_token_issuance_proof.spthy
+  processing time: 1.95s
+  
+  executable_authentication (exists-trace): analysis incomplete (1 steps)
+  rp_required_uv_acceptance (all-traces): analysis incomplete (1 steps)
+  credential_private_key_secrecy (all-traces): analysis incomplete (1 steps)
+  pin_secrecy (all-traces): analysis incomplete (1 steps)
+  ga_token_secrecy (all-traces): analysis incomplete (1 steps)
+  pin_authorizes_token_issuance (all-traces): verified (2 steps)
+  noninjective_agreement_authentication_context (all-traces): analysis incomplete (1 steps)
+  injective_agreement_authentication_context (all-traces): analysis incomplete (1 steps)
+  authentication_context_consistency (all-traces): analysis incomplete (1 steps)
+  authentication_assurance_provenance (all-traces): analysis incomplete (1 steps)
+
+==============================================================================

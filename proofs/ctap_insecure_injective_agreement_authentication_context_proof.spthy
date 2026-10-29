@@ -1,0 +1,504 @@
+theory FIDO2_UV_Downgrade_AuthFocused begin
+
+// Function signature and definition of the equational theory E
+
+functions: fst/1, h/1, hmac/2, pair/2, pk/1, sign/2, snd/1, true/0,
+           verify/3
+equations:
+    fst(<x.1, x.2>) = x.1,
+    snd(<x.1, x.2>) = x.2,
+    verify(sign(x.1, x.2), x.1, pk(x.2)) = true
+
+
+
+
+
+
+
+
+
+rule (modulo E) Provision_Registered_Credential:
+   [ Fr( ~credentialId ), Fr( ~credentialKey ), Fr( ~pin ) ]
+  --[
+  CredentialProvisioned( ~credentialId, pk(~credentialKey) ),
+  PINProvisioned( ~pin ), SecretCredentialKey( ~credentialKey ),
+  SecretPIN( ~pin )
+  ]->
+   [
+   !RPRegisteredCredential( ~credentialId, pk(~credentialKey) ),
+   !AuthenticatorCredential( ~credentialId, ~credentialKey ),
+   !AuthenticatorPIN( ~pin )
+   ]
+
+  /* has exactly the trivial AC variant */
+
+rule (modulo E) RP_Send_M5_Secure:
+   [
+   !RPRegisteredCredential( credentialId, credentialPublicKey ),
+   Fr( ~challenge )
+   ]
+  --[
+  RPAuthenticationChallengeSent( credentialId, ~challenge, 'required' ),
+  RunningRPAuthContext( credentialId,
+                        h(<'webauthn_get', ~challenge, 'origin'>), 'user_verified'
+  ),
+  WebAuthnChannelSent( 'M5', 'required', 'secure' )
+  ]->
+   [
+   St_RP_AuthPending( ~challenge, credentialId, credentialPublicKey,
+                      'required'
+   ),
+   Sec_WA_M5( ~challenge, credentialId, 'required' )
+   ]
+
+  /* has exactly the trivial AC variant */
+
+rule (modulo E) Browser_Prepare_Required_Secure:
+   [ Sec_WA_M5( challenge, credentialId, 'required' ) ]
+  --[
+  WebAuthnChannelDelivered( 'M5', 'required', 'secure' ),
+  BrowserAuthenticationPrepared( credentialId, challenge, 'required',
+                                 'true'
+  )
+  ]->
+   [
+   St_Browser_NeedGAToken( challenge, credentialId,
+                           <'webauthn_get', challenge, 'origin'>,
+                           h(<'webauthn_get', challenge, 'origin'>)
+   )
+   ]
+
+  /* has exactly the trivial AC variant */
+
+rule (modulo E) Browser_Acquire_GA_UV_Token:
+   [
+   St_Browser_NeedGAToken( challenge, credentialId, clientData, clientHash
+   ),
+   !AuthenticatorPIN( pin ), Fr( ~token )
+   ]
+  --[
+  PINVerified( pin ),
+  UVAuthorizedForSession( 'rp_id', clientHash, 'ga', ~token ),
+  AuthenticatorUVPerformed( credentialId ),
+  TokenIssued( ~token, 'ga', 'rp_id' ), SecretToken( ~token )
+  ]->
+   [
+   St_Browser_HaveGAToken( challenge, credentialId, clientData, clientHash,
+                           ~token
+   ),
+   St_ValidGAToken( ~token, 'rp_id' )
+   ]
+
+  /* has exactly the trivial AC variant */
+
+rule (modulo E) Browser_Send_GA_WithUV_Insecure:
+   [
+   St_Browser_HaveGAToken( challenge, credentialId, clientData, clientHash,
+                           token
+   )
+   ]
+  --[
+  BrowserGetAssertionSent( credentialId, clientHash, 'token' ),
+  RunningBrowserAuthContext( credentialId, clientHash, 'user_verified' ),
+  BrowserPinUvAuthParamSent( credentialId, clientHash,
+                             hmac(token, clientHash)
+  ),
+  CTAPChannelSent( 'GA_UV', 'insecure' )
+  ]->
+   [
+   St_Browser_AwaitAssertion( challenge, credentialId, clientData,
+                              clientHash
+   ),
+   Out( <'ctap_ga_uv', credentialId, clientHash, hmac(token, clientHash)> )
+   ]
+
+  /* has exactly the trivial AC variant */
+
+rule (modulo E) Authenticator_GA_WithUV_Insecure:
+   [
+   St_ValidGAToken( token, 'rp_id' ),
+   !AuthenticatorCredential( credentialId, credentialKey ),
+   In( <'ctap_ga_uv', credentialId, clientHash, hmac(token, clientHash)> )
+   ]
+  --[
+  CTAPChannelDelivered( 'GA_UV', 'insecure' ),
+  CommitAuthenticatorUV( 'rp_id', clientHash, 'ga', token ),
+  CommitAuthenticatorAuthContext( credentialId, clientHash, 'user_verified'
+  ),
+  AuthenticatorGetAssertionAuthorized( credentialId, clientHash, 'token',
+                                       'true'
+  ),
+  AuthenticatorPinUvAuthParamAccepted( credentialId, clientHash,
+                                       hmac(token, clientHash)
+  ),
+  AssertionSigned( credentialId, credentialKey, clientHash, 'true' ),
+  CommitAuthenticatorAuthContext( credentialId, clientHash, 'user_verified'
+  )
+  ]->
+   [
+   Out( <'ctap_ga_resp', credentialId, 
+         <'auth_data', h('rp_id'), 'true', 'true', 'zero'>, 
+         sign(<<'auth_data', h('rp_id'), 'true', 'true', 'zero'>, clientHash>,
+              credentialKey)
+        >
+   )
+   ]
+
+  /* has exactly the trivial AC variant */
+
+rule (modulo E) Authenticator_GA_WithoutUV_Insecure:
+   [
+   !AuthenticatorCredential( credentialId, credentialKey ),
+   In( <'ctap_ga_no_uv', credentialId, clientHash> )
+   ]
+  --[
+  CTAPChannelDelivered( 'GA_NOUV', 'insecure' ),
+  AuthenticatorGetAssertionAuthorized( credentialId, clientHash,
+                                       'no_token', 'false'
+  ),
+  AssertionSigned( credentialId, credentialKey, clientHash, 'false' ),
+  CommitAuthenticatorAuthContext( credentialId, clientHash, 'presence_only'
+  )
+  ]->
+   [
+   Out( <'ctap_ga_resp', credentialId, 
+         <'auth_data', h('rp_id'), 'true', 'false', 'zero'>, 
+         sign(<<'auth_data', h('rp_id'), 'true', 'false', 'zero'>, clientHash>,
+              credentialKey)
+        >
+   )
+   ]
+
+  /* has exactly the trivial AC variant */
+
+rule (modulo E) Browser_Receive_GA_Response_Insecure:
+   [
+   St_Browser_AwaitAssertion( challenge, credentialId, clientData,
+                              clientHash
+   ),
+   In( <'ctap_ga_resp', credentialId, authData, signature> )
+   ]
+  --[ CTAPChannelDelivered( 'GA_RESP', 'insecure' ) ]->
+   [
+   St_Browser_HaveAssertion( challenge, credentialId, clientData,
+                             clientHash, authData, signature
+   )
+   ]
+
+  /* has exactly the trivial AC variant */
+
+rule (modulo E) Browser_Send_M8_Secure:
+   [
+   St_Browser_HaveAssertion( challenge, credentialId, clientData,
+                             clientHash, authData, signature
+   )
+   ]
+  --[
+  BrowserAuthenticationM8Sent( credentialId, challenge ),
+  WebAuthnChannelSent( 'M8', 'response', 'secure' )
+  ]->
+   [ Sec_WA_M8( clientData, credentialId, authData, signature ) ]
+
+  /* has exactly the trivial AC variant */
+
+rule (modulo E) RP_Accept_M8_Secure:
+   [
+   St_RP_AuthPending( challenge, credentialId, credentialPublicKey,
+                      'required'
+   ),
+   Sec_WA_M8( <'webauthn_get', challenge, 'origin'>, credentialId,
+              <'auth_data', h('rp_id'), 'true', 'true', 'zero'>, signature
+   )
+   ]
+  --[
+  WebAuthnChannelDelivered( 'M8', 'response', 'secure' ),
+  Eq( verify(signature,
+             <<'auth_data', h('rp_id'), 'true', 'true', 'zero'>, 
+              h(<'webauthn_get', challenge, 'origin'>)>,
+             credentialPublicKey),
+      true
+  ),
+  RPAuthenticationAccepted( credentialId,
+                            h(<'webauthn_get', challenge, 'origin'>), 'true'
+  )
+  ]->
+   [ St_RP_Accepted( credentialId ) ]
+
+  /*
+  rule (modulo AC) RP_Accept_M8_Secure:
+     [
+     St_RP_AuthPending( challenge, credentialId, credentialPublicKey,
+                        'required'
+     ),
+     Sec_WA_M8( <'webauthn_get', challenge, 'origin'>, credentialId,
+                <'auth_data', h('rp_id'), 'true', 'true', 'zero'>, signature
+     )
+     ]
+    --[
+    WebAuthnChannelDelivered( 'M8', 'response', 'secure' ), Eq( z, true ),
+    RPAuthenticationAccepted( credentialId,
+                              h(<'webauthn_get', challenge, 'origin'>), 'true'
+    )
+    ]->
+     [ St_RP_Accepted( credentialId ) ]
+    variants (modulo AC)
+    1. challenge
+             = challenge.20
+       credentialPublicKey
+             = credentialPublicKey.22
+       signature
+             = signature.23
+       z     = verify(signature.23,
+                      <<'auth_data', h('rp_id'), 'true', 'true', 'zero'>, 
+                       h(<'webauthn_get', challenge.20, 'origin'>)>,
+                      credentialPublicKey.22)
+    
+    2. challenge
+             = challenge.154
+       credentialPublicKey
+             = pk(x.306)
+       signature
+             = sign(<<'auth_data', h('rp_id'), 'true', 'true', 'zero'>, 
+                     h(<'webauthn_get', challenge.154, 'origin'>)>,
+                    x.306)
+       z     = true
+  */
+
+restriction Equality:
+  "∀ x y #i. (Eq( x, y ) @ #i) ⇒ (x = y)"
+  // safety formula
+
+lemma executable_authentication:
+  exists-trace
+  "∃ credentialId credentialKey clientHash #i #j #k.
+    ((((CredentialProvisioned( credentialId, pk(credentialKey) ) @ #i) ∧
+       (AssertionSigned( credentialId, credentialKey, clientHash, 'true'
+        ) @ #j)) ∧
+      (RPAuthenticationAccepted( credentialId, clientHash, 'true' ) @ #k)) ∧
+     (#i < #j)) ∧
+    (#j < #k)"
+/*
+guarded formula characterizing all satisfying traces:
+"∃ credentialId credentialKey clientHash #i #j #k.
+  (CredentialProvisioned( credentialId, pk(credentialKey) ) @ #i) ∧
+  (AssertionSigned( credentialId, credentialKey, clientHash, 'true'
+   ) @ #j) ∧
+  (RPAuthenticationAccepted( credentialId, clientHash, 'true' ) @ #k)
+ ∧
+  (#i < #j) ∧ (#j < #k)"
+*/
+by sorry
+
+lemma rp_required_uv_acceptance:
+  all-traces
+  "∀ credentialId clientHash uv #i.
+    (RPAuthenticationAccepted( credentialId, clientHash, uv ) @ #i) ⇒
+    (uv = 'true')"
+/*
+guarded formula characterizing all counter-examples:
+"∃ credentialId clientHash uv #i.
+  (RPAuthenticationAccepted( credentialId, clientHash, uv ) @ #i)
+ ∧
+  ¬(uv = 'true')"
+*/
+by sorry
+
+lemma credential_private_key_secrecy:
+  all-traces
+  "∀ credentialKey #i.
+    (SecretCredentialKey( credentialKey ) @ #i) ⇒
+    (¬(∃ #j. K( credentialKey ) @ #j))"
+/*
+guarded formula characterizing all counter-examples:
+"∃ credentialKey #i.
+  (SecretCredentialKey( credentialKey ) @ #i)
+ ∧
+  ∃ #j. (K( credentialKey ) @ #j)"
+*/
+by sorry
+
+lemma pin_secrecy:
+  all-traces "∀ pin #i. (SecretPIN( pin ) @ #i) ⇒ (¬(∃ #j. K( pin ) @ #j))"
+/*
+guarded formula characterizing all counter-examples:
+"∃ pin #i. (SecretPIN( pin ) @ #i) ∧ ∃ #j. (K( pin ) @ #j)"
+*/
+by sorry
+
+lemma ga_token_secrecy:
+  all-traces
+  "∀ token #i. (SecretToken( token ) @ #i) ⇒ (¬(∃ #j. K( token ) @ #j))"
+/*
+guarded formula characterizing all counter-examples:
+"∃ token #i. (SecretToken( token ) @ #i) ∧ ∃ #j. (K( token ) @ #j)"
+*/
+by sorry
+
+lemma pin_authorizes_token_issuance:
+  all-traces
+  "∀ token #i.
+    (TokenIssued( token, 'ga', 'rp_id' ) @ #i) ⇒
+    (∃ pin. PINVerified( pin ) @ #i)"
+/*
+guarded formula characterizing all counter-examples:
+"∃ token #i.
+  (TokenIssued( token, 'ga', 'rp_id' ) @ #i)
+ ∧
+  ∀ pin. (PINVerified( pin ) @ #i) ⇒ ⊥"
+*/
+by sorry
+
+lemma noninjective_agreement_authentication_context:
+  all-traces
+  "∀ credentialId clientHash authContext #commit.
+    (CommitAuthenticatorAuthContext( credentialId, clientHash, authContext
+     ) @ #commit) ⇒
+    (∃ #rp #browser.
+      (((RunningRPAuthContext( credentialId, clientHash, authContext ) @ #rp) ∧
+        (RunningBrowserAuthContext( credentialId, clientHash, authContext
+         ) @ #browser)) ∧
+       (#rp < #browser)) ∧
+      (#browser < #commit))"
+/*
+guarded formula characterizing all counter-examples:
+"∃ credentialId clientHash authContext #commit.
+  (CommitAuthenticatorAuthContext( credentialId, clientHash, authContext
+   ) @ #commit)
+ ∧
+  ∀ #rp #browser.
+   (RunningRPAuthContext( credentialId, clientHash, authContext ) @ #rp) ∧
+   (RunningBrowserAuthContext( credentialId, clientHash, authContext
+    ) @ #browser)
+  ⇒
+   ((¬(#rp < #browser)) ∨ (¬(#browser < #commit)))"
+*/
+by sorry
+
+lemma injective_agreement_authentication_context:
+  all-traces
+  "∀ credentialId clientHash authContext #commit.
+    (CommitAuthenticatorAuthContext( credentialId, clientHash, authContext
+     ) @ #commit) ⇒
+    (∃ #rp #browser.
+      ((((RunningRPAuthContext( credentialId, clientHash, authContext
+          ) @ #rp) ∧
+         (RunningBrowserAuthContext( credentialId, clientHash, authContext
+          ) @ #browser)) ∧
+        (#rp < #browser)) ∧
+       (#browser < #commit)) ∧
+      (¬(∃ #commit2.
+          (CommitAuthenticatorAuthContext( credentialId, clientHash, authContext
+           ) @ #commit2) ∧
+          (¬(#commit2 = #commit)))))"
+/*
+guarded formula characterizing all counter-examples:
+"∃ credentialId clientHash authContext #commit.
+  (CommitAuthenticatorAuthContext( credentialId, clientHash, authContext
+   ) @ #commit)
+ ∧
+  ∀ #rp #browser.
+   (RunningRPAuthContext( credentialId, clientHash, authContext ) @ #rp) ∧
+   (RunningBrowserAuthContext( credentialId, clientHash, authContext
+    ) @ #browser)
+  ⇒
+   ((¬(#rp < #browser)) ∨
+    (¬(#browser < #commit)) ∨
+    (∃ #commit2.
+      (CommitAuthenticatorAuthContext( credentialId, clientHash, authContext
+       ) @ #commit2)
+     ∧
+      ¬(#commit2 = #commit)))"
+*/
+simplify
+solve( CommitAuthenticatorAuthContext( credentialId, clientHash,
+                                       authContext
+       ) @ #commit )
+  case Authenticator_GA_WithUV_Insecure_case_1
+  solve( St_ValidGAToken( token, 'rp_id' ) ▶₀ #commit )
+    case Browser_Acquire_GA_UV_Token
+    solve( !AuthenticatorCredential( credentialId, credentialKey
+           ) ▶₁ #commit )
+      case Provision_Registered_Credential
+      solve( !KU( ~credentialId ) @ #vk.3 )
+        case Browser_Send_GA_WithUV_Insecure
+        solve( !KU( hmac(~token, clientHash) ) @ #vk.6 )
+          case Browser_Send_GA_WithUV_Insecure
+          solve( !KU( h(<'webauthn_get', ~challenge, 'origin'>) ) @ #vk.6 )
+            case Browser_Send_GA_WithUV_Insecure
+            SOLVED // trace found
+          qed
+        qed
+      qed
+    qed
+  qed
+qed
+
+lemma authentication_context_consistency:
+  all-traces
+  "∀ credentialId clientHash expectedContext actualContext #rp #auth.
+    (((RunningRPAuthContext( credentialId, clientHash, expectedContext
+       ) @ #rp) ∧
+      (CommitAuthenticatorAuthContext( credentialId, clientHash, actualContext
+       ) @ #auth)) ∧
+     (#rp < #auth)) ⇒
+    (expectedContext = actualContext)"
+/*
+guarded formula characterizing all counter-examples:
+"∃ credentialId clientHash expectedContext actualContext #rp #auth.
+  (RunningRPAuthContext( credentialId, clientHash, expectedContext
+   ) @ #rp) ∧
+  (CommitAuthenticatorAuthContext( credentialId, clientHash, actualContext
+   ) @ #auth)
+ ∧
+  (#rp < #auth) ∧ (¬(expectedContext = actualContext))"
+*/
+by sorry
+
+lemma authentication_assurance_provenance:
+  all-traces
+  "∀ clientHash token #auth.
+    (CommitAuthenticatorUV( 'rp_id', clientHash, 'ga', token ) @ #auth) ⇒
+    (∃ #uv.
+      (UVAuthorizedForSession( 'rp_id', clientHash, 'ga', token ) @ #uv) ∧
+      (#uv < #auth))"
+/*
+guarded formula characterizing all counter-examples:
+"∃ clientHash token #auth.
+  (CommitAuthenticatorUV( 'rp_id', clientHash, 'ga', token ) @ #auth)
+ ∧
+  ∀ #uv.
+   (UVAuthorizedForSession( 'rp_id', clientHash, 'ga', token ) @ #uv)
+  ⇒
+   ¬(#uv < #auth)"
+*/
+by sorry
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/* All wellformedness checks were successful. */
+
+/*
+Generated from:
+Tamarin version 1.10.0
+Maude version 3.1
+Git revision: cb62c305f8c8b8c1e664152aa33c95b7b8d5ef32, branch: master
+Compiled at: 2024-10-30 11:11:02.432289291 UTC
+*/
+
+end
